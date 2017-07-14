@@ -98,7 +98,7 @@ best_seednumber = 1234
 best_loss = Inf
 best_loss_index = 0
 
-for (iter in 1:5) {
+for (iter in 1:500) {
   param <- list(objective = mylossobj2,
                 eval_metric = evalerror2,
                 #num_class = 12,
