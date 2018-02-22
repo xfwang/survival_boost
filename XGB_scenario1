@@ -1,0 +1,125 @@
+
+library(xgboost)
+OUTNAME=0
+for(i in 0:9)
+{
+  n1=200  #sample size of train data
+  n2=100  #sample size of train data
+  n=n1+n2
+  p=50   # #features
+  
+  #simulate predictors from uniform(-0.5,0.5)
+  X=matrix(runif(n*p,-0.5,0.5),ncol=p)
+  
+  f1=4*X[,1]^2+X[,1]
+  f2=sin(6*X[,2])
+  f3=cos(6*X[,3]-1)
+  f4=4*X[,4]^3+X[,4]^2
+  f=f1+f2+f3+f4
+  
+  t=rexp(n,rate=1/(exp(-1.25)*exp(f)))
+  c=rexp(n,rate=1/0.4)
+  obs.time=pmin(t,c)
+  status=(t<=c)
+  
+
+  #survival cox model
+  require(survival)
+  df2 <- structure(list(X_c=X[1:n1,], status_c=status[1:n1], obs.time_c=obs.time[1:n1],class = "data.frame"))
+  #.Names = c("X_c", "status_c",'obs.time_c'), class = "data.frame"))
+  fit1=coxph(Surv(obs.time_c, status_c)~ X_c, method="breslow",data=df2)
+  newdata=structure(list(X_c=X[(n1+1):n,],
+  .Names = c("X_c"), class = "data.frame"))
+  cox_pred=predict(fit1,newdata,type="lp")
+  ##xgboost
+  #convert to xgboost data structure
+  
+  Dtrain<-xgb.DMatrix(X[1:n1,],label=obs.time[1:n1])
+  attr(Dtrain,"censor")<-status[1:n1]
+  Dtest<-xgb.DMatrix(X[(n1+1):n,],label=obs.time[(n1+1):n])
+  attr(Dtest,"censor")<-status[(n1+1):n]
+  
+  #define objective function and evaluation function
+  mylossobj2<-function(preds, dtrain) {
+    labels <- getinfo(dtrain, "label") 
+    censor<-attr(dtrain,"censor")
+    ord<-order(labels)
+    ran=rank(labels)
+    d=censor[ord]  #status
+    etas=preds[ord] #linear predictor
+    haz<-as.numeric(exp(etas)) #w[i]
+    rsk<-rev(cumsum(rev(haz))) #W[i]
+    P<-outer (haz,rsk,'/')
+    P[upper.tri(P)] <- 0
+    grad<- -(d-P%*%d)
+    grad=grad[ran]
+    H1=P
+    H2=outer(haz^2,rsk^2,'/')
+    H=H1-H2
+    H[upper.tri(H)]=0
+    hess=H%*%d  
+    hess=hess[ran]
+    return(list(grad = grad, hess = hess))
+  }
+  
+  evalerror2 <- function(preds, dtrain) {
+    labels <- getinfo(dtrain, "label") #labels<-dtrain$label
+    censor<-attr(dtrain,"censor") 
+    ord<-order(labels)
+    d=censor[ord]  #status
+    etas=preds[ord] #linear predictor
+    haz<-as.numeric(exp(etas)) #w[i]
+    rsk<-rev(cumsum(rev(haz)))
+    err <- -2*sum(d*(etas-log(rsk)))/length(labels)
+    return(list(metric = "deviance",value = err))
+  }
+  
+  best_param = list()
+  best_seednumber = 1234
+  best_loss = Inf
+  best_loss_index = 0
+  
+  for (iter in 1:100) {
+    param <- list(objective = mylossobj2,
+                  eval_metric = evalerror2,
+                  #num_class = 12,
+                  max_depth = sample(6:13, 1),
+                  eta = runif(1, .01, .3),
+                  gamma = runif(1, 0.0, 0.2), 
+                  subsample = runif(1, .6, .9),
+                  colsample_bytree = runif(1, .5, 1), 
+                  min_child_weight = sample(1:40, 1),
+                  max_delta_step = sample(1:10, 1),
+                  colsample_bylevel=runif(1, .5, 1),
+                  lambda=runif(1,0,2),
+                  alpha=runif(1,0,2)
+    )
+    cv.nround = 500
+    cv.nfold = 5
+    seed.number = sample.int(10000, 1)[[1]]
+    set.seed(seed.number)
+    mdcv <- xgb.cv(data=Dtrain, params = param, nthread=6, 
+                   nfold=cv.nfold, nrounds=cv.nround,
+                   verbose = F)
+    
+    min_loss = min(mdcv$evaluation_log[,'test_deviance_mean'])
+    min_loss_index = which.min(as.numeric(unlist(mdcv$evaluation_log[,'test_deviance_mean'])))
+    
+    if (min_loss < best_loss) {
+      best_loss = min_loss
+      best_loss_index = min_loss_index
+      best_seednumber = seed.number
+      best_param = param
+    }
+    print(iter)
+  }
+  
+  nround = best_loss_index
+  set.seed(best_seednumber)
+  best_param$objective=mylossobj2
+  md <- xgboost(data=Dtrain, params=best_param, nrounds=nround,nthread=6)
+  a=xgb.importance(model=md)
+  b=predict(md,Dtest)
+  res=list(a,b,cox_pred,status,obs.time,X)
+  save(res,file=paste("/home/xw75/zhenyu/", OUTNAME+i, ".Rdata", sep="" ))
+}
