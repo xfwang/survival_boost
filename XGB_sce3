@@ -1,0 +1,156 @@
+OUTNAME=0
+for(i in 0:9)
+{
+n1=300
+n2=500
+n=n1+n2
+p=100
+#beta=1
+rho=0.5; #0.75
+
+#generate covaraince matrix  V=rho^|i-j|
+#we can also generate R then use cholesky to intrdouce cor.
+V=matrix(0,ncol=p,nrow=p)
+for (i in 1:p) {
+  for (j in 1:p ){
+    V[i,j]=rho^abs(i-j)
+  }
+}
+X=MASS::mvrnorm(n=n,mu=rep(0,p),Sigma=V)
+
+#mu=exp(2*pnorm(X[,10]^2+X[,50]^2-1)) #***
+#mu=exp(2*pnorm(0.5*X[,10]+X[,50]^2-1))
+#mu=exp(2*pnorm(sin(X[,10])+X[,50]^2-1))
+#mu=exp(2*pnorm(cos(X[,10])+X[,50]^2-1)) #***
+#mu=exp(2*pnorm((X[,10]>0.5)+X[,50]^2-1)) #***
+mu=exp(((X[,10]>0.8)+X[,50]^2-1)) #*** try this plot(gbm1,c(10,30),best.iter)
+
+
+T=-(log(runif(n)))/(mu)
+
+a=2*rbinom(n=n, size=1, prob=1/3); b=runif(n=n,min=0,max=2)
+a[a==0]=b[a==0]
+C=a
+obs.time<- pmin(T,C)
+status <- T<=C
+#table(status)
+
+#coxph
+library(survival)
+fit1=coxph(Surv(obs.time[1:n1], status[1:n1])~ X[1:n1,], method="breslow")
+cox_pred=predict(fit1,as.data.frame(X[(n1+1):n,]),type="lp")
+#gbm cox
+#gbm cox
+#library(gbm)
+#library(survival)
+#gbm1 <- gbm(Surv(obs.time,status)~ .,       # formula
+#            data=as.data.frame(X),                 # dataset
+#            #weights=w,
+#            #var.monotone=c(0,0,0),     # -1: monotone decrease, +1: monotone increase, 0: no #monotone restrictions
+#            distribution="coxph",
+#            n.trees=2000,              # number of trees
+#            shrinkage=0.005,           # shrinkage or learning rate, 0.001 to 0.1 usually work
+#            #interaction.depth=1,       # 1: additive model, 2: two-way interactions, etc
+#            #           bag.fraction = 0.5,        # subsampling fraction, 0.5 is probably best
+#           train.fraction = 0.8,      # fraction of data for training, first train.fraction*N #used for training
+#            cv.folds = 5,              # do 5-fold cross-validation
+#n.minobsinnode = 10,       # minimum total weight needed in each node
+#            keep.data = TRUE,
+#            verbose = TRUE)           #  print progress
+#summary(gbm1)
+#best.iter <- gbm.perf(gbm1,method="cv")
+#summary(gbm1,n.trees=best.iter) # based on the estimated best number of trees
+#gbm_pred=predict(gbm1,as.data.frame(X[(n1+1):n,]))
+
+
+library(xgboost)
+Dtrain<-xgb.DMatrix(X[1:n1,],label=obs.time[1:n1])
+attr(Dtrain,"censor")<-status[1:n1]
+Dtest<-xgb.DMatrix(X[(n1+1):n,],label=obs.time[(n1+1):n])
+attr(Dtest,"censor")<-status[(n1+1):n]
+
+mylossobj2<-function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label") 
+  censor<-attr(dtrain,"censor")
+  ord<-order(labels)
+  ran=rank(labels)
+  d=censor[ord]  #status
+  etas=preds[ord] #linear predictor
+  haz<-as.numeric(exp(etas)) #w[i]
+  rsk<-rev(cumsum(rev(haz))) #W[i]
+  P<-outer (haz,rsk,'/')
+  P[upper.tri(P)] <- 0
+  grad<- -(d-P%*%d)
+  grad=grad[ran]
+  H1=P
+  H2=outer(haz^2,rsk^2,'/')
+  H=H1-H2
+  H[upper.tri(H)]=0
+  hess=H%*%d  
+  hess=hess[ran]
+  return(list(grad = grad, hess = hess))
+}
+
+evalerror2 <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label") #labels<-dtrain$label
+  censor<-attr(dtrain,"censor") 
+  ord<-order(labels)
+  d=censor[ord]  #status
+  etas=preds[ord] #linear predictor
+  haz<-as.numeric(exp(etas)) #w[i]
+  rsk<-rev(cumsum(rev(haz)))
+  err <- -2*sum(d*(etas-log(rsk)))/length(labels)
+  return(list(metric = "deviance",value = err))
+}
+
+best_param = list()
+best_seednumber = 1234
+best_loss = Inf
+best_loss_index = 0
+
+for (iter in 1:20) {
+  param <- list(objective = mylossobj2,
+                eval_metric = evalerror2,
+                #num_class = 12,
+                max_depth = sample(6:13, 1),
+                eta = runif(1, .01, .3),
+                gamma = runif(1, 0.0, 0.2), 
+                subsample = runif(1, .6, .9),
+                colsample_bytree = runif(1, .5, 1), 
+                min_child_weight = sample(1:40, 1),
+                max_delta_step = sample(1:10, 1),
+                colsample_bylevel=runif(1, .5, 1),
+                lambda=runif(1,0,2),
+                alpha=runif(1,0,2)
+  )
+  cv.nround = 500
+  cv.nfold = 5
+  seed.number = sample.int(10000, 1)[[1]]
+  set.seed(seed.number)
+  mdcv <- xgb.cv(data=Dtrain, params = param, nthread=6, 
+                 nfold=cv.nfold, nrounds=cv.nround,
+                 verbose = F)
+  
+  min_loss = min(mdcv$evaluation_log[,'test_deviance_mean'])
+  min_loss_index = which.min(as.numeric(unlist(mdcv$evaluation_log[,'test_deviance_mean'])))
+  
+  if (min_loss < best_loss) {
+    best_loss = min_loss
+    best_loss_index = min_loss_index
+    best_seednumber = seed.number
+    best_param = param
+  }
+  print(iter)
+}
+
+nround = best_loss_index
+set.seed(best_seednumber)
+best_param$objective=mylossobj2
+md <- xgboost(data=Dtrain, params=best_param, nrounds=nround,nthread=6)
+a=xgb.importance(model=md)
+
+xgb_pred=predict(md,Dtest)
+gbm1=gbm_pred=NA
+res=list(X,obs.time,status,gbm1,gbm_pred,fit1,cox_pred,a,xgb_pred)
+save(res,file=paste("/home/xw75/zhenyu/", OUTNAME+i, ".Rdata", sep="" ))
+}
