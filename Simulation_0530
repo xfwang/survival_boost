@@ -35,7 +35,7 @@
     if((i/1)%%4==0){mu=mu+X[,i]^2/0.5}
     if((i/1)%%4==1){mu=mu+cos(X[,i])}
     if((i/1)%%4==2){mu=mu+sin(i*X[,i])}
-    if((i/1)%%4==3){mu=mu+X[,i]*X[,i-5]}
+    if((i/1)%%4==3){mu=mu+X[,i]*X[,i-1]}
   }
   #mu=exp(-p)*exp(mu) #0.05 FOR 50
   #mu=exp((X[,10]>0.8)-1) #*** try this plot(gbm1,c(10,30),best.iter)
